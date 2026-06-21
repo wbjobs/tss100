@@ -1,6 +1,11 @@
 const chalk = require('chalk');
 const MicroserviceTopology = require('../src/index');
 const FailureSimulator = require('../src/simulators/failure');
+const HistoryStorage = require('../src/storages/history');
+const DriftAnalyzer = require('../src/analyzers/drift');
+const EmailNotifier = require('../src/notifiers/email');
+const SlackNotifier = require('../src/notifiers/slack');
+const CronScheduler = require('../src/schedulers/cron');
 
 let passed = 0;
 let failed = 0;
@@ -227,6 +232,228 @@ async function runTests() {
     const result = topology.simulateFailure('non-existent-service');
     assert(result.success === false, '对不存在的服务应该返回失败');
     assert(result.error, '应该包含错误信息');
+  });
+
+  console.log('\n' + chalk.bold('9. 历史存储模块测试'));
+  
+  const historyStorage = new HistoryStorage();
+  
+  test('历史存储初始化正常', () => {
+    assert(historyStorage.storageDir, '缺少存储目录');
+    assert(typeof historyStorage.storageDir === 'string', '存储目录格式错误');
+  });
+
+  test('能够保存历史快照', () => {
+    const result = historyStorage.saveSnapshot(analysis, 'mock');
+    assert(result.timestamp, '缺少时间戳');
+    assert(result.path, '缺少文件路径');
+    assert(result.snapshot, '缺少快照数据');
+  });
+
+  test('能够加载历史快照', () => {
+    historyStorage.saveSnapshot(analysis, 'mock');
+    const snapshots = historyStorage.loadRecentSnapshots(10);
+    assert(Array.isArray(snapshots), '快照列表格式错误');
+    assert(snapshots.length > 0, '应该至少有一个快照');
+  });
+
+  test('能够列出所有快照', () => {
+    const list = historyStorage.listSnapshots();
+    assert(Array.isArray(list), '快照列表格式错误');
+    assert(list.length > 0, '应该至少有一个快照');
+    assert(list[0].timestamp, '缺少时间戳');
+    assert(list[0].path, '缺少文件路径');
+  });
+
+  test('能够获取存储统计', () => {
+    const stats = historyStorage.getStats();
+    assert(typeof stats.snapshotCount === 'number', '缺少快照总数');
+    assert(typeof stats.totalSizeBytes === 'number', '缺少总大小');
+    assert(stats.storageDir, '缺少存储目录');
+  });
+
+  console.log('\n' + chalk.bold('10. 异常漂移检测模块测试'));
+  
+  test('漂移分析器初始化正常', () => {
+    const driftAnalyzer = new DriftAnalyzer(historyStorage, { minSnapshotsForTrend: 3 });
+    assert(driftAnalyzer.minSnapshotsForTrend === 3, '最小快照数设置错误');
+    assert(driftAnalyzer.history === historyStorage, '历史存储未正确设置');
+  });
+
+  test('线性回归趋势计算正常', () => {
+    const driftAnalyzer = new DriftAnalyzer(historyStorage, { minSnapshotsForTrend: 3 });
+    const series = [
+      { avgIncomingLatency: 100, timestamp: Date.now() - 86400000 * 2 },
+      { avgIncomingLatency: 110, timestamp: Date.now() - 86400000 },
+      { avgIncomingLatency: 120, timestamp: Date.now() }
+    ];
+    const trend = driftAnalyzer._calculateTrend(series, 'avgIncomingLatency');
+    assert(trend !== null, '趋势计算应该返回结果');
+    assert(typeof trend.slope === 'number', '斜率应该是数字');
+    assert(typeof trend.rSquared === 'number', 'R²应该是数字');
+    assert(trend.direction === 'up', '趋势方向应该是上升');
+    assert(trend.slope > 0, '斜率应该为正');
+    assert(trend.rSquared > 0.9, 'R²应该接近1');
+  });
+
+  test('漂移检测能够识别异常', () => {
+    historyStorage.clearAll();
+    const baseTime = Date.now() - 86400000 * 4;
+    for (let i = 0; i < 4; i++) {
+      const snapshot = {
+        timestamp: baseTime + i * 86400000,
+        services: {
+          'test-svc': {
+            avgIncomingLatency: 100 + i * 30,
+            errorRate: 0.01 + i * 0.02,
+            score: 95 - i * 5,
+            cpuUsage: 30 + i * 10,
+            memoryUsage: 40 + i * 5,
+            healthStatus: i < 3 ? 'healthy' : 'degraded',
+            instanceCount: 3
+          }
+        },
+        edges: {},
+        summary: {
+          totalServices: 1,
+          healthyCount: 1,
+          degradedCount: i === 3 ? 1 : 0,
+          unhealthyCount: 0,
+          overallScore: 95 - i * 5,
+          overallStatus: i < 3 ? 'healthy' : 'degraded',
+          criticalPathDuration: 100,
+          criticalPathLength: 1,
+          slowEdgeCount: 0,
+          highErrorEdgeCount: 0
+        }
+      };
+      const fs = require('fs');
+      const path = require('path');
+      const date = new Date(snapshot.timestamp);
+      const dateStr = date.toISOString().replace(/[:.]/g, '-');
+      const snapshotPath = path.join(historyStorage.storageDir, `snapshot-${dateStr}.json`);
+      fs.writeFileSync(snapshotPath, JSON.stringify(snapshot, null, 2), 'utf8');
+    }
+    
+    const currentSnapshot = historyStorage.loadLatestSnapshot();
+    const driftAnalyzer = new DriftAnalyzer(historyStorage, { minSnapshotsForTrend: 3 });
+    const result = driftAnalyzer.detect(currentSnapshot);
+    
+    assert(result !== null, '漂移检测应该返回结果');
+    assert(result.serviceAnomalies, '应该有服务异常列表');
+    assert(result.summary, '应该有汇总信息');
+    assert(typeof result.summary.totalAnomalies === 'number', '应该有异常总数');
+  });
+
+  console.log('\n' + chalk.bold('11. 通知模块测试'));
+  
+  test('邮件通知器初始化正常', () => {
+    const emailNotifier = new EmailNotifier({
+      host: 'smtp.example.com',
+      port: 587,
+      user: 'test@example.com',
+      pass: 'password'
+    });
+    assert(emailNotifier.config, '缺少配置');
+    assert(emailNotifier.transporter, '缺少邮件传输器');
+  });
+
+  test('邮件通知器能够构建漂移报告文本', () => {
+    const emailNotifier = new EmailNotifier({ host: 'smtp.example.com', port: 587 });
+    const drift = {
+      severity: 'warning',
+      summary: { totalAnomalies: 5, criticalAnomalies: 1, warningAnomalies: 3, infoAnomalies: 1 },
+      serviceAnomalies: [
+        { service: 'test-svc', maxSeverity: 'warning', anomalyCount: 2, anomalies: [{ message: '延迟上升' }] }
+      ],
+      trends: []
+    };
+    const text = emailNotifier._buildDriftText(drift, analysis);
+    assert(typeof text === 'string', '文本格式错误');
+    assert(text.includes('异常漂移检测报告'), '缺少报告标题');
+    assert(text.includes('test-svc'), '缺少服务名称');
+  });
+
+  test('Slack通知器初始化正常', () => {
+    const slackNotifier = new SlackNotifier({
+      webhookUrl: 'https://hooks.slack.com/test',
+      channel: '#alerts'
+    });
+    assert(slackNotifier.webhookUrl === 'https://hooks.slack.com/test', 'Webhook URL设置错误');
+    assert(slackNotifier.channel === '#alerts', '频道设置错误');
+  });
+
+  test('Slack通知器能够构建漂移报告Blocks', () => {
+    const slackNotifier = new SlackNotifier({ webhookUrl: 'https://hooks.slack.com/test' });
+    const drift = {
+      severity: 'warning',
+      summary: { totalAnomalies: 5, criticalAnomalies: 1, warningAnomalies: 3, infoAnomalies: 1 },
+      serviceAnomalies: [
+        { service: 'test-svc', maxSeverity: 'warning', anomalyCount: 2, anomalies: [{ message: '延迟上升' }] }
+      ],
+      trends: []
+    };
+    const blocks = slackNotifier._buildDriftBlocks(drift, analysis);
+    assert(Array.isArray(blocks), 'Blocks格式错误');
+    assert(blocks.length > 0, 'Blocks不能为空');
+    assert(blocks[0].type === 'header', '第一个Block应该是header');
+  });
+
+  console.log('\n' + chalk.bold('12. 定时调度模块测试'));
+  
+  test('调度器初始化正常', () => {
+    const scheduler = new CronScheduler();
+    assert(scheduler.jobs, '缺少作业映射');
+    assert(typeof scheduler.jobs === 'object', '作业映射格式错误');
+  });
+
+  test('能够解析简化间隔表达式', () => {
+    const scheduler = new CronScheduler();
+    assert(scheduler._parseInterval('30s') === 30 * 1000, '30秒解析错误');
+    assert(scheduler._parseInterval('1m') === 60 * 1000, '1分钟解析错误');
+    assert(scheduler._parseInterval('5m') === 5 * 60 * 1000, '5分钟解析错误');
+    assert(scheduler._parseInterval('1h') === 60 * 60 * 1000, '1小时解析错误');
+    assert(scheduler._parseInterval('1d') === 24 * 60 * 60 * 1000, '1天解析错误');
+    assert(scheduler._parseInterval('invalid') === null, '无效间隔应该返回null');
+  });
+
+  test('能够构建Cron表达式', () => {
+    const scheduler = new CronScheduler();
+    const cron = scheduler._buildCronExpression({ minute: '*/5' });
+    assert(typeof cron === 'string', 'Cron表达式格式错误');
+    assert(cron.includes('*/5'), 'Cron表达式应该包含*/5');
+  });
+
+  console.log('\n' + chalk.bold('13. 主类新功能集成测试'));
+  
+  test('主类能够保存历史快照', () => {
+    topology.saveHistory('test');
+    const stats = topology.getHistoryStats();
+    assert(stats.snapshotCount > 0, '应该有历史快照');
+  });
+
+  test('主类能够列出历史快照', () => {
+    const list = topology.listHistory();
+    assert(Array.isArray(list), '历史列表格式错误');
+    assert(list.length > 0, '应该至少有一个快照');
+  });
+
+  test('主类能够对比历史检测漂移', () => {
+    const result = topology.compareHistory({
+      minSnapshots: 2,
+      driftThreshold: 0.1,
+      severityThreshold: 'info'
+    });
+    assert(result !== null, '对比历史应该返回结果');
+    assert(result.currentSnapshot, '应该包含当前快照');
+    assert(result.drift, '应该包含漂移检测结果');
+    assert(typeof result.reportText === 'string', '应该包含文本报告');
+    assert(typeof result.reportHtml === 'string', '应该包含HTML报告');
+  });
+
+  test('主类能够列出定时任务', () => {
+    const jobs = topology.listSchedules();
+    assert(Array.isArray(jobs), '任务列表格式错误');
   });
 
   console.log('\n' + chalk.bold('═══════════════════════════════════════════════════'));
