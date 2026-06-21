@@ -2,6 +2,11 @@ class DependencyAnalyzer {
   constructor(data) {
     this.data = data;
     this.serviceNames = data.services.map(s => s.name);
+    this.serviceSet = new Set(this.serviceNames);
+    this._adj = null;
+    this._revAdj = null;
+    this._inDeg = null;
+    this._outDeg = null;
   }
 
   analyze() {
@@ -10,7 +15,7 @@ class DependencyAnalyzer {
     const inDegree = this.calculateInDegree();
     const outDegree = this.calculateOutDegree();
     const topoOrder = this.topologicalSort();
-    const layers = this.assignLayers();
+    const layers = this.assignLayersBFS();
     const cycles = this.detectCycles();
 
     return {
@@ -26,11 +31,9 @@ class DependencyAnalyzer {
   }
 
   buildAdjacencyList() {
+    if (this._adj) return this._adj;
     const adj = {};
-    this.serviceNames.forEach(name => {
-      adj[name] = [];
-    });
-
+    this.serviceNames.forEach(name => { adj[name] = []; });
     this.data.calls.forEach(call => {
       if (!adj[call.from]) adj[call.from] = [];
       if (!adj[call.to]) adj[call.to] = [];
@@ -39,19 +42,20 @@ class DependencyAnalyzer {
         avgLatency: call.avgLatency,
         p99Latency: call.p99Latency,
         errorRate: call.errorRate,
-        requestCount: call.requestCount
+        requestCount: call.requestCount,
+        circuitBreaker: call.circuitBreaker || null,
+        retry: call.retry || null,
+        fallback: call.fallback || null
       });
     });
-
+    this._adj = adj;
     return adj;
   }
 
   buildReverseAdjacencyList() {
+    if (this._revAdj) return this._revAdj;
     const revAdj = {};
-    this.serviceNames.forEach(name => {
-      revAdj[name] = [];
-    });
-
+    this.serviceNames.forEach(name => { revAdj[name] = []; });
     this.data.calls.forEach(call => {
       if (!revAdj[call.to]) revAdj[call.to] = [];
       if (!revAdj[call.from]) revAdj[call.from] = [];
@@ -60,56 +64,52 @@ class DependencyAnalyzer {
         avgLatency: call.avgLatency,
         p99Latency: call.p99Latency,
         errorRate: call.errorRate,
-        requestCount: call.requestCount
+        requestCount: call.requestCount,
+        circuitBreaker: call.circuitBreaker || null,
+        retry: call.retry || null,
+        fallback: call.fallback || null
       });
     });
-
+    this._revAdj = revAdj;
     return revAdj;
   }
 
   calculateInDegree() {
+    if (this._inDeg) return this._inDeg;
     const inDeg = {};
-    this.serviceNames.forEach(name => {
-      inDeg[name] = 0;
-    });
-
+    this.serviceNames.forEach(name => { inDeg[name] = 0; });
     this.data.calls.forEach(call => {
       inDeg[call.to] = (inDeg[call.to] || 0) + 1;
     });
-
+    this._inDeg = inDeg;
     return inDeg;
   }
 
   calculateOutDegree() {
+    if (this._outDeg) return this._outDeg;
     const outDeg = {};
-    this.serviceNames.forEach(name => {
-      outDeg[name] = 0;
-    });
-
+    this.serviceNames.forEach(name => { outDeg[name] = 0; });
     this.data.calls.forEach(call => {
       outDeg[call.from] = (outDeg[call.from] || 0) + 1;
     });
-
+    this._outDeg = outDeg;
     return outDeg;
   }
 
   topologicalSort() {
     const inDeg = { ...this.calculateInDegree() };
+    const adj = this.buildAdjacencyList();
     const queue = [];
     const result = [];
 
     Object.entries(inDeg).forEach(([name, deg]) => {
-      if (deg === 0) {
-        queue.push(name);
-      }
+      if (deg === 0) queue.push(name);
     });
 
     while (queue.length > 0) {
       const current = queue.shift();
       result.push(current);
-
-      const neighbors = this.buildAdjacencyList()[current] || [];
-      neighbors.forEach(neighbor => {
+      (adj[current] || []).forEach(neighbor => {
         inDeg[neighbor.service]--;
         if (inDeg[neighbor.service] === 0) {
           queue.push(neighbor.service);
@@ -120,51 +120,39 @@ class DependencyAnalyzer {
     if (result.length !== this.serviceNames.length) {
       return [...this.serviceNames];
     }
-
     return result;
   }
 
-  assignLayers() {
-    const layers = {};
+  assignLayersBFS() {
     const adj = this.buildAdjacencyList();
-    const inDeg = this.calculateInDegree();
-    const maxDepth = this.serviceNames.length + 10;
+    const layers = {};
+    const inDeg = { ...this.calculateInDegree() };
+    const remaining = new Set(this.serviceNames);
+    let currentLayer = 0;
 
-    const roots = Object.entries(inDeg)
-      .filter(([_, deg]) => deg === 0)
-      .map(([name]) => name);
-
-    const assignLayer = (service, layer, path = new Set()) => {
-      if (layer > maxDepth) return;
-      if (path.has(service)) return;
-      
-      path.add(service);
-      
-      if (layers[service] === undefined || layers[service] < layer) {
-        layers[service] = layer;
-      }
-
-      adj[service].forEach(neighbor => {
-        if (!path.has(neighbor.service)) {
-          assignLayer(neighbor.service, layer + 1, new Set(path));
+    while (remaining.size > 0) {
+      const roots = [...remaining].filter(s => inDeg[s] === 0);
+      if (roots.length === 0) {
+        for (const s of remaining) {
+          layers[s] = currentLayer;
         }
-      });
-    };
-
-    roots.forEach(root => assignLayer(root, 0));
-
-    this.serviceNames.forEach(name => {
-      if (layers[name] === undefined) {
-        assignLayer(name, 0);
+        break;
       }
-    });
-
-    const allLayers = Object.values(layers);
-    const maxLayer = allLayers.length > 0 ? Math.max(...allLayers) : 0;
-    const grouped = {};
-    for (let i = 0; i <= maxLayer; i++) {
-      grouped[i] = [];
+      roots.forEach(s => {
+        layers[s] = currentLayer;
+        remaining.delete(s);
+      });
+      roots.forEach(s => {
+        (adj[s] || []).forEach(n => {
+          inDeg[n.service]--;
+        });
+      });
+      currentLayer++;
     }
+
+    const maxLayer = Math.max(...Object.values(layers), 0);
+    const grouped = {};
+    for (let i = 0; i <= maxLayer; i++) grouped[i] = [];
     Object.entries(layers).forEach(([name, layer]) => {
       grouped[layer].push(name);
     });
@@ -174,92 +162,45 @@ class DependencyAnalyzer {
 
   detectCycles() {
     const adj = this.buildAdjacencyList();
-    const visited = new Set();
-    const recursionStack = new Set();
+    const WHITE = 0, GRAY = 1, BLACK = 2;
+    const color = {};
+    this.serviceNames.forEach(n => { color[n] = WHITE; });
     const cycles = [];
-    const path = [];
 
-    const dfs = (service) => {
-      visited.add(service);
-      recursionStack.add(service);
-      path.push(service);
-
-      const neighbors = adj[service] || [];
-      for (const neighbor of neighbors) {
-        if (!visited.has(neighbor.service)) {
-          if (dfs(neighbor.service)) {
-            return true;
-          }
-        } else if (recursionStack.has(neighbor.service)) {
-          const cycleStart = path.indexOf(neighbor.service);
-          const cycle = path.slice(cycleStart);
-          cycle.push(neighbor.service);
-          cycles.push([...cycle]);
-          return true;
+    const dfs = (u) => {
+      color[u] = GRAY;
+      for (const v of (adj[u] || [])) {
+        if (color[v.service] === GRAY) {
+          cycles.push([u, v.service]);
+        } else if (color[v.service] === WHITE) {
+          dfs(v.service);
         }
       }
-
-      recursionStack.delete(service);
-      path.pop();
-      return false;
+      color[u] = BLACK;
     };
 
-    this.serviceNames.forEach(name => {
-      if (!visited.has(name)) {
-        dfs(name);
-      }
+    this.serviceNames.forEach(n => {
+      if (color[n] === WHITE) dfs(n);
     });
-
     return cycles;
-  }
-
-  findAllPaths(start, end, maxDepth = 10) {
-    const adj = this.buildAdjacencyList();
-    const paths = [];
-    const visited = new Set();
-
-    const dfs = (current, path, depth) => {
-      if (depth > maxDepth) return;
-      if (current === end) {
-        paths.push([...path]);
-        return;
-      }
-
-      visited.add(current);
-      const neighbors = adj[current] || [];
-      for (const neighbor of neighbors) {
-        if (!visited.has(neighbor.service)) {
-          path.push(neighbor.service);
-          dfs(neighbor.service, path, depth + 1);
-          path.pop();
-        }
-      }
-      visited.delete(current);
-    };
-
-    dfs(start, [start], 0);
-    return paths;
   }
 
   getDownstreamServices(serviceName) {
     const adj = this.buildAdjacencyList();
     const visited = new Set();
     const result = [];
-
-    const dfs = (current) => {
-      if (visited.has(current)) return;
-      visited.add(current);
-      
-      const neighbors = adj[current] || [];
-      for (const neighbor of neighbors) {
+    const queue = [serviceName];
+    visited.add(serviceName);
+    while (queue.length > 0) {
+      const current = queue.shift();
+      for (const neighbor of (adj[current] || [])) {
         if (!visited.has(neighbor.service)) {
+          visited.add(neighbor.service);
           result.push(neighbor.service);
-          dfs(neighbor.service);
+          queue.push(neighbor.service);
         }
       }
-    };
-
-    dfs(serviceName);
+    }
     return result;
   }
 
@@ -267,22 +208,24 @@ class DependencyAnalyzer {
     const revAdj = this.buildReverseAdjacencyList();
     const visited = new Set();
     const result = [];
-
-    const dfs = (current) => {
-      if (visited.has(current)) return;
-      visited.add(current);
-      
-      const neighbors = revAdj[current] || [];
-      for (const neighbor of neighbors) {
+    const queue = [serviceName];
+    visited.add(serviceName);
+    while (queue.length > 0) {
+      const current = queue.shift();
+      for (const neighbor of (revAdj[current] || [])) {
         if (!visited.has(neighbor.service)) {
+          visited.add(neighbor.service);
           result.push(neighbor.service);
-          dfs(neighbor.service);
+          queue.push(neighbor.service);
         }
       }
-    };
-
-    dfs(serviceName);
+    }
     return result;
+  }
+
+  getEdge(from, to) {
+    const adj = this.buildAdjacencyList();
+    return (adj[from] || []).find(e => e.service === to) || null;
   }
 }
 

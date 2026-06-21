@@ -23,17 +23,17 @@ class MockAdapter extends BaseAdapter {
           c => c.from === serviceName || c.to === serviceName
         )
       };
-      
+
       const relatedServices = new Set([serviceName]);
       filtered.calls.forEach(c => {
         relatedServices.add(c.from);
         relatedServices.add(c.to);
       });
-      
+
       filtered.services = this.mockData.services.filter(
         s => relatedServices.has(s.name)
       );
-      
+
       return filtered;
     }
 
@@ -145,24 +145,132 @@ class MockAdapter extends BaseAdapter {
     ];
 
     const calls = [
-      { from: 'api-gateway', to: 'auth-service', avgLatency: 12, p99Latency: 45, errorRate: 0.2, requestCount: 150000 },
-      { from: 'api-gateway', to: 'user-service', avgLatency: 25, p99Latency: 80, errorRate: 0.5, requestCount: 200000 },
-      { from: 'api-gateway', to: 'order-service', avgLatency: 45, p99Latency: 150, errorRate: 2.1, requestCount: 80000 },
-      { from: 'api-gateway', to: 'product-service', avgLatency: 18, p99Latency: 60, errorRate: 0.3, requestCount: 180000 },
-      { from: 'api-gateway', to: 'search-service', avgLatency: 65, p99Latency: 200, errorRate: 1.8, requestCount: 95000 },
-      { from: 'auth-service', to: 'user-service', avgLatency: 15, p99Latency: 50, errorRate: 0.1, requestCount: 100000 },
-      { from: 'order-service', to: 'user-service', avgLatency: 20, p99Latency: 70, errorRate: 0.8, requestCount: 75000 },
-      { from: 'order-service', to: 'payment-service', avgLatency: 85, p99Latency: 300, errorRate: 3.5, requestCount: 70000 },
-      { from: 'order-service', to: 'inventory-service', avgLatency: 120, p99Latency: 500, errorRate: 8.2, requestCount: 72000 },
-      { from: 'order-service', to: 'notification-service', avgLatency: 30, p99Latency: 90, errorRate: 0.4, requestCount: 68000 },
-      { from: 'order-service', to: 'analytics-service', avgLatency: 35, p99Latency: 100, errorRate: 0.6, requestCount: 65000 },
-      { from: 'payment-service', to: 'user-service', avgLatency: 10, p99Latency: 35, errorRate: 0.2, requestCount: 68000 },
-      { from: 'product-service', to: 'inventory-service', avgLatency: 40, p99Latency: 120, errorRate: 5.5, requestCount: 120000 },
-      { from: 'product-service', to: 'analytics-service', avgLatency: 25, p99Latency: 80, errorRate: 0.3, requestCount: 110000 },
-      { from: 'search-service', to: 'product-service', avgLatency: 22, p99Latency: 75, errorRate: 0.7, requestCount: 90000 },
-      { from: 'user-service', to: 'notification-service', avgLatency: 18, p99Latency: 55, errorRate: 0.2, requestCount: 85000 },
-      { from: 'analytics-service', to: 'user-service', avgLatency: 12, p99Latency: 40, errorRate: 0.1, requestCount: 50000 },
-      { from: 'analytics-service', to: 'product-service', avgLatency: 15, p99Latency: 45, errorRate: 0.15, requestCount: 45000 }
+      {
+        from: 'api-gateway', to: 'auth-service',
+        avgLatency: 12, p99Latency: 45, errorRate: 0.2, requestCount: 150000,
+        circuitBreaker: { state: 'closed', errorThresholdPercentage: 50, requestVolumeThreshold: 20, sleepWindowMs: 5000 },
+        retry: { maxRetries: 2, backoffMs: 100 },
+        fallback: null
+      },
+      {
+        from: 'api-gateway', to: 'user-service',
+        avgLatency: 25, p99Latency: 80, errorRate: 0.5, requestCount: 200000,
+        circuitBreaker: { state: 'closed', errorThresholdPercentage: 50, requestVolumeThreshold: 20, sleepWindowMs: 5000 },
+        retry: { maxRetries: 1, backoffMs: 50 },
+        fallback: null
+      },
+      {
+        from: 'api-gateway', to: 'order-service',
+        avgLatency: 45, p99Latency: 150, errorRate: 2.1, requestCount: 80000,
+        circuitBreaker: { state: 'closed', errorThresholdPercentage: 50, requestVolumeThreshold: 20, sleepWindowMs: 5000 },
+        retry: { maxRetries: 2, backoffMs: 200 },
+        fallback: null
+      },
+      {
+        from: 'api-gateway', to: 'product-service',
+        avgLatency: 18, p99Latency: 60, errorRate: 0.3, requestCount: 180000,
+        circuitBreaker: { state: 'closed', errorThresholdPercentage: 50, requestVolumeThreshold: 20, sleepWindowMs: 5000 },
+        retry: null,
+        fallback: null
+      },
+      {
+        from: 'api-gateway', to: 'search-service',
+        avgLatency: 65, p99Latency: 200, errorRate: 1.8, requestCount: 95000,
+        circuitBreaker: { state: 'half-open', errorThresholdPercentage: 50, requestVolumeThreshold: 20, sleepWindowMs: 10000 },
+        retry: { maxRetries: 1, backoffMs: 150 },
+        fallback: { target: 'product-service', successRate: 0.7, avgLatency: 30 }
+      },
+      {
+        from: 'auth-service', to: 'user-service',
+        avgLatency: 15, p99Latency: 50, errorRate: 0.1, requestCount: 100000,
+        circuitBreaker: { state: 'closed', errorThresholdPercentage: 50, requestVolumeThreshold: 20, sleepWindowMs: 5000 },
+        retry: { maxRetries: 2, backoffMs: 50 },
+        fallback: null
+      },
+      {
+        from: 'order-service', to: 'user-service',
+        avgLatency: 20, p99Latency: 70, errorRate: 0.8, requestCount: 75000,
+        circuitBreaker: { state: 'closed', errorThresholdPercentage: 50, requestVolumeThreshold: 20, sleepWindowMs: 5000 },
+        retry: { maxRetries: 1, backoffMs: 100 },
+        fallback: null
+      },
+      {
+        from: 'order-service', to: 'payment-service',
+        avgLatency: 85, p99Latency: 300, errorRate: 3.5, requestCount: 70000,
+        circuitBreaker: { state: 'half-open', errorThresholdPercentage: 50, requestVolumeThreshold: 20, sleepWindowMs: 15000 },
+        retry: { maxRetries: 3, backoffMs: 500 },
+        fallback: { target: 'payment-cache', successRate: 0.85, avgLatency: 5 }
+      },
+      {
+        from: 'order-service', to: 'inventory-service',
+        avgLatency: 120, p99Latency: 500, errorRate: 8.2, requestCount: 72000,
+        circuitBreaker: { state: 'open', errorThresholdPercentage: 50, requestVolumeThreshold: 20, sleepWindowMs: 30000 },
+        retry: { maxRetries: 2, backoffMs: 300 },
+        fallback: { target: 'inventory-cache', successRate: 0.9, avgLatency: 10 }
+      },
+      {
+        from: 'order-service', to: 'notification-service',
+        avgLatency: 30, p99Latency: 90, errorRate: 0.4, requestCount: 68000,
+        circuitBreaker: { state: 'closed', errorThresholdPercentage: 50, requestVolumeThreshold: 20, sleepWindowMs: 5000 },
+        retry: null,
+        fallback: null
+      },
+      {
+        from: 'order-service', to: 'analytics-service',
+        avgLatency: 35, p99Latency: 100, errorRate: 0.6, requestCount: 65000,
+        circuitBreaker: { state: 'closed', errorThresholdPercentage: 50, requestVolumeThreshold: 20, sleepWindowMs: 5000 },
+        retry: null,
+        fallback: { target: 'analytics-queue', successRate: 0.95, avgLatency: 2 }
+      },
+      {
+        from: 'payment-service', to: 'user-service',
+        avgLatency: 10, p99Latency: 35, errorRate: 0.2, requestCount: 68000,
+        circuitBreaker: { state: 'closed', errorThresholdPercentage: 50, requestVolumeThreshold: 20, sleepWindowMs: 5000 },
+        retry: { maxRetries: 1, backoffMs: 50 },
+        fallback: null
+      },
+      {
+        from: 'product-service', to: 'inventory-service',
+        avgLatency: 40, p99Latency: 120, errorRate: 5.5, requestCount: 120000,
+        circuitBreaker: { state: 'open', errorThresholdPercentage: 50, requestVolumeThreshold: 20, sleepWindowMs: 30000 },
+        retry: { maxRetries: 2, backoffMs: 200 },
+        fallback: { target: 'inventory-cache', successRate: 0.9, avgLatency: 10 }
+      },
+      {
+        from: 'product-service', to: 'analytics-service',
+        avgLatency: 25, p99Latency: 80, errorRate: 0.3, requestCount: 110000,
+        circuitBreaker: { state: 'closed', errorThresholdPercentage: 50, requestVolumeThreshold: 20, sleepWindowMs: 5000 },
+        retry: null,
+        fallback: { target: 'analytics-queue', successRate: 0.95, avgLatency: 2 }
+      },
+      {
+        from: 'search-service', to: 'product-service',
+        avgLatency: 22, p99Latency: 75, errorRate: 0.7, requestCount: 90000,
+        circuitBreaker: { state: 'closed', errorThresholdPercentage: 50, requestVolumeThreshold: 20, sleepWindowMs: 5000 },
+        retry: { maxRetries: 1, backoffMs: 100 },
+        fallback: null
+      },
+      {
+        from: 'user-service', to: 'notification-service',
+        avgLatency: 18, p99Latency: 55, errorRate: 0.2, requestCount: 85000,
+        circuitBreaker: { state: 'closed', errorThresholdPercentage: 50, requestVolumeThreshold: 20, sleepWindowMs: 5000 },
+        retry: null,
+        fallback: null
+      },
+      {
+        from: 'analytics-service', to: 'user-service',
+        avgLatency: 12, p99Latency: 40, errorRate: 0.1, requestCount: 50000,
+        circuitBreaker: { state: 'closed', errorThresholdPercentage: 50, requestVolumeThreshold: 20, sleepWindowMs: 5000 },
+        retry: null,
+        fallback: null
+      },
+      {
+        from: 'analytics-service', to: 'product-service',
+        avgLatency: 15, p99Latency: 45, errorRate: 0.15, requestCount: 45000,
+        circuitBreaker: { state: 'closed', errorThresholdPercentage: 50, requestVolumeThreshold: 20, sleepWindowMs: 5000 },
+        retry: null,
+        fallback: null
+      }
     ];
 
     return { services, calls };
